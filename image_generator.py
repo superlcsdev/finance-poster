@@ -13,12 +13,12 @@ from io import BytesIO
 
 # ── Config ─────────────────────────────────────────────────────────────────
 IMAGE_WIDTH  = 1200
-IMAGE_HEIGHT = 630
+IMAGE_HEIGHT = 632
 TIMEOUT_SECS = 120
 MAX_RETRIES  = 3
 
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
-HF_API_URL   = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+HF_API_URL   = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
 
 FONT_PATHS_BOLD = [
     "arialbd.ttf",

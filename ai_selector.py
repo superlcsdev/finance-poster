@@ -1,12 +1,15 @@
 """
 ai_selector.py
-Selects the most viral finance/side-income article for Filipino audience.
+Selects the most viral finance/side-income article for Filipino professional audience.
+Tracks post history to prevent repeating articles within 30 days.
 Uses Gemini → OpenRouter → heuristic fallback.
 """
 
 import os
 import json
+import hashlib
 import requests
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,23 +17,28 @@ load_dotenv()
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
-SELECTION_PROMPT = """You are a viral finance content strategist for Facebook targeting Filipinos 
-in Singapore and the Philippines, as well as general Asian audiences.
+# ── History config ─────────────────────────────────────────────────────────────
+HISTORY_FILE = "post_history.json"
+HISTORY_DAYS = 30
+MAX_HISTORY  = 200
 
-Given these finance/business articles, select the ONE most likely to get high engagement 
-(shares, reactions, comments) on Facebook.
+SELECTION_PROMPT = """You are a finance content strategist for Facebook targeting Filipino professionals
+— nurses, IT workers, engineers, architects, pharmacists — in Singapore and the Philippines.
+
+Given these finance/business articles, select the ONE most likely to get high engagement.
 
 Prioritise articles that:
-- Speak to OFWs, overseas workers, or people with a single income source
-- Highlight financial struggle, survival, or aspiration relatable to Filipinos
-- Inspire people to think about side income or financial independence
-- Contain surprising statistics or uncomfortable financial truths
-- Are actionable and immediately useful for everyday people
+- Speak to professionals with good salaries who aren't building wealth fast enough
+- Highlight the gap between earning well and being financially free
+- Cover side income, investing, or building wealth alongside a career
+- Contain surprising stats or uncomfortable truths professionals can relate to
+- Are relevant to someone earning SGD 3,000–6,000/month or PHP 50,000–120,000/month
 
 Avoid:
-- Too technical or stock market jargon-heavy articles
-- Articles targeting ultra-wealthy or Western-specific audiences
+- OFW hardship or remittance framing
+- Articles targeting ultra-wealthy or very niche investors
 - Political or conflict-related content
+- Too technical or jargon-heavy for a general professional audience
 
 Articles:
 {articles_list}
@@ -38,18 +46,17 @@ Articles:
 Respond ONLY with valid JSON in this exact format (no other text):
 {{
   "selected_index": <number 0-based>,
-  "reason": "<one sentence why this article wins for Filipino audience>"
+  "reason": "<one sentence why this article wins for Filipino professionals>"
 }}"""
 
-# Heuristic scoring keywords tuned for Filipino side-income audience
+# Heuristic scoring keywords — tuned for professional wealth-building audience
 VIRAL_KEYWORDS = [
     "side income", "passive income", "extra income", "financial freedom",
-    "side hustle", "multiple income", "single income", "paycheck",
-    "savings", "invest", "ofw", "overseas", "retire", "quit your job",
-    "earn online", "work from home", "small business", "entrepreneur",
-    "broke", "debt", "struggle", "survive", "inflation", "salary",
-    "simple", "easy", "proven", "secret", "reveals", "study", "warning",
-    "you should", "everyone", "most people", "shocking", "truth",
+    "side hustle", "multiple income", "invest", "salary", "retire",
+    "wealth", "savings", "income stream", "entrepreneur", "build wealth",
+    "financial independence", "stock", "real estate", "debt free",
+    "net worth", "study", "reveals", "warning", "truth", "most people",
+    "professionals", "engineer", "nurse", "career", "high earner",
 ]
 
 BLOCKED_KEYWORDS = [
@@ -58,6 +65,65 @@ BLOCKED_KEYWORDS = [
     "election fraud", "scandal", "arrested", "indicted",
 ]
 
+
+# ── History management ─────────────────────────────────────────────────────────
+
+def _article_hash(title: str) -> str:
+    return hashlib.md5(title.lower().strip().encode()).hexdigest()[:12]
+
+
+def _load_history() -> list:
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    try:
+        with open(HISTORY_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_history(history: list):
+    cutoff = (datetime.now() - timedelta(days=HISTORY_DAYS)).isoformat()
+    recent = [h for h in history if h.get("date", "") >= cutoff]
+    recent = recent[-MAX_HISTORY:]
+    try:
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(recent, f, indent=2)
+    except Exception as e:
+        print(f"  ⚠️  Could not save history: {e}")
+
+
+def save_posted_article(article: dict):
+    """Call after successfully posting to record the article."""
+    history = _load_history()
+    history.append({
+        "hash":  _article_hash(article["title"]),
+        "title": article["title"][:100],
+        "date":  datetime.now().isoformat(),
+    })
+    _save_history(history)
+    print(f"  📝 Saved to history: {article['title'][:60]}...")
+
+
+def _filter_already_posted(articles: list) -> list:
+    """Remove articles posted within the last HISTORY_DAYS days."""
+    history     = _load_history()
+    cutoff      = (datetime.now() - timedelta(days=HISTORY_DAYS)).isoformat()
+    recent_hash = {h["hash"] for h in history if h.get("date", "") >= cutoff}
+
+    filtered = [a for a in articles if _article_hash(a["title"]) not in recent_hash]
+    removed  = len(articles) - len(filtered)
+
+    if removed:
+        print(f"  🚫 Filtered out {removed} recently posted articles.")
+    if not filtered:
+        print("  ⚠️  All articles were recently posted — resetting filter for today.")
+        return articles
+
+    return filtered
+
+
+# ── Article selection ──────────────────────────────────────────────────────────
 
 def _is_suitable(article: dict) -> bool:
     title_lower = article["title"].lower()
@@ -134,39 +200,45 @@ def select_best_article(articles: list[dict]) -> dict | None:
     if not articles:
         return None
 
+    # Filter blocked content
     suitable = [a for a in articles if _is_suitable(a)]
     if not suitable:
-        print("  ⚠️  No suitable articles after filtering — using all.")
+        print("  ⚠️  No suitable articles after content filter — using all.")
         suitable = articles
     print(f"  📊 {len(suitable)}/{len(articles)} articles passed content filter.")
+
+    # Filter already posted
+    fresh = _filter_already_posted(suitable)
 
     result = None
     if GEMINI_API_KEY:
         print("  🤖 Using Gemini to select article...")
-        result = _select_via_gemini(suitable)
+        result = _select_via_gemini(fresh)
     elif OPENROUTER_API_KEY:
         print("  🤖 Using OpenRouter to select article...")
-        result = _select_via_openrouter(suitable)
+        result = _select_via_openrouter(fresh)
     else:
         print("  ⚠️  No AI key set — using heuristic selection.")
 
     if not result:
-        result = _heuristic_select(suitable)
+        result = _heuristic_select(fresh)
 
     idx    = result.get("selected_index", 0)
     reason = result.get("reason", "")
     print(f"  ✅ Selected index {idx}: {reason}")
 
-    if 0 <= idx < len(suitable):
-        return suitable[idx]
-    return suitable[0]
+    if 0 <= idx < len(fresh):
+        return fresh[idx]
+    return fresh[0]
 
 
 if __name__ == "__main__":
     test_articles = [
-        {"title": "OFW in Singapore: How to Save $1,000 a Month on a Regular Salary", "source": "MoneySmart SG", "summary": ""},
-        {"title": "5 Side Hustles Filipinos Are Using to Double Their Income in 2026",  "source": "Entrepreneur",  "summary": ""},
-        {"title": "Why Most People Will Never Retire Comfortably (And What To Do Now)", "source": "CNBC",          "summary": ""},
+        {"title": "Why Engineers With Good Salaries Still Can't Retire Early", "source": "Forbes", "summary": ""},
+        {"title": "5 Income Streams Every Professional Should Build in Their 30s", "source": "Entrepreneur", "summary": ""},
+        {"title": "The Investment Mistake Most High-Earning Nurses Make", "source": "MoneySmart SG", "summary": ""},
     ]
     best = select_best_article(test_articles)
     print(f"\nSelected: {best['title']}")
+    save_posted_article(best)
+    print("History saved.")

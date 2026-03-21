@@ -1,24 +1,35 @@
 """
 image_generator.py
-Generates Facebook post images for finance/side-income content.
-Uses Pollinations.ai (free) → Hugging Face fallback → solid colour fallback.
-Visual style: aspirational wealth, freedom, warm gold tones.
+Generates Facebook post images for finance/wealth content.
+Priority: HuggingFace SDXL → HuggingFace SD 2.1 → Pollinations → solid colour fallback.
+Visual style: aspirational wealth, professional, warm gold tones.
 """
 
 import requests
 import time
 import os
+import hashlib
+from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 
 # ── Config ─────────────────────────────────────────────────────────────────
 IMAGE_WIDTH  = 1200
-IMAGE_HEIGHT = 632
+IMAGE_HEIGHT = 632   # divisible by 8 (required by HuggingFace)
 TIMEOUT_SECS = 120
 MAX_RETRIES  = 3
 
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
-HF_API_URL   = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
+
+# Primary HF model — SDXL (best quality)
+HF_API_URL_PRIMARY  = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
+# Secondary HF model — SD 2.1 (faster, reliable fallback)
+HF_API_URL_FALLBACK = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-2-1"
+
+SAFE_FALLBACK_PROMPT = (
+    "aspirational wealth lifestyle, laptop coffee modern desk, "
+    "warm golden tones, professional, clean background, no text, no words"
+)
 
 FONT_PATHS_BOLD = [
     "arialbd.ttf",
@@ -32,27 +43,6 @@ FONT_PATHS_REGULAR = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 ]
-
-# Finance-specific category backgrounds
-CATEGORY_PROMPTS = {
-    "finance":     "professional wealth lifestyle, successful entrepreneur at laptop, "
-                   "city skyline window view, warm golden hour lighting, aspirational, no text",
-    "sideincome":  "freedom lifestyle photography, laptop on beach or cafe, "
-                   "passive income aesthetic, bright warm tones, aspirational, no text",
-    "investment":  "financial growth concept, golden coins stacked, upward chart abstract, "
-                   "dark navy and gold tones, professional, no text",
-    "savings":     "piggy bank coins jar, warm soft lighting, hopeful aesthetic, "
-                   "Filipino family home context, no text",
-    "ofw":         "airplane window view, overseas worker lifestyle, "
-                   "sending money home concept, warm emotional tones, no text",
-    "default":     "aspirational finance lifestyle, successful Asian professional, "
-                   "warm gold tones, modern office or city background, no text",
-}
-
-SAFE_FALLBACK_PROMPT = (
-    "aspirational wealth lifestyle, laptop coffee modern desk, "
-    "warm golden tones, professional, clean background, no text, no words"
-)
 
 
 def _load_font(paths: list, size: int):
@@ -68,76 +58,182 @@ def _load_font(paths: list, size: int):
 
 
 def _build_prompt(headline: str, category: str = "default") -> str:
-    style = CATEGORY_PROMPTS.get(category.lower(), CATEGORY_PROMPTS["default"])
-    return f"{style}, high resolution, photorealistic, no text, no words, no letters"
+    """
+    Build prompt with high visual variety — 32 styles rotating by date + headline.
+    Finance-specific styles: wealth, professional, aspirational.
+    """
+    STYLE_POOL = [
+        # Professional & wealth
+        "successful professional at modern office desk, city skyline view, warm golden hour, no text",
+        "luxury minimalist home office setup, natural light, aspirational lifestyle, no text",
+        "aerial city financial district at golden hour, warm tones, ambitious, no text",
+        "entrepreneur working laptop in sleek modern cafe, warm ambient light, no text",
+        "professional Asian woman reviewing charts, modern office, confident, aspirational, no text",
+        "glass skyscraper exterior reflecting sunset, financial district, no text",
+        "modern coworking space, diverse professionals, bright natural light, no text",
+        "executive boardroom with city view, professional, clean lines, warm tones, no text",
+        # Investment & wealth symbols
+        "golden coins and growing plant on marble, wealth growth concept, clean minimal, no text",
+        "upward trending abstract chart, gold and navy tones, financial success, no text",
+        "stack of books and laptop, self-improvement, warm lighting, professional desk, no text",
+        "piggy bank with coins and plants, savings growth, bright optimistic tones, no text",
+        "clock and coins concept, time and money, clean minimal, professional, no text",
+        "calculator and financial documents, professional, clean white desk, no text",
+        "keys and miniature house model, property investment concept, warm light, no text",
+        "chess pieces on board, strategic thinking, business metaphor, dark elegant, no text",
+        # Freedom & lifestyle
+        "person working laptop on tropical beach, digital nomad lifestyle, no text",
+        "convertible car on coastal road, freedom lifestyle, golden hour, aspirational, no text",
+        "luxury travel first class seat, business success lifestyle, clean, no text",
+        "rooftop terrace with city view, successful lifestyle, evening golden light, no text",
+        "person hiking mountain summit, achievement metaphor, dramatic landscape, no text",
+        "sailboat on calm blue ocean, financial freedom concept, bright clear sky, no text",
+        # Abstract & conceptual
+        "geometric gold lines on dark background, wealth abstraction, elegant minimal, no text",
+        "light through prism creating spectrum, opportunity concept, clean studio, no text",
+        "compass on world map, navigation success, warm leather tones, no text",
+        "ladder leading to bright sky, growth opportunity, clean concept, no text",
+        "bridge over calm water, connection progress, sunrise golden tones, no text",
+        "seeds growing into plants in glass jars, wealth cultivation, bright clean, no text",
+        # Asian professional context
+        "Singapore financial district skyline, Marina Bay, golden hour, no text",
+        "Manila Makati business district, modern towers, evening lights, no text",
+        "Asian professional in smart casual, confident pose, neutral background, no text",
+        "team of diverse Asian professionals, modern office, collaborative, no text",
+    ]
+
+    date_str  = datetime.now().strftime("%Y-%m-%d")
+    hash_seed = int(hashlib.md5((date_str + headline[:30]).encode()).hexdigest(), 16)
+    style     = STYLE_POOL[hash_seed % len(STYLE_POOL)]
+
+    return f"{style}, high resolution, photorealistic, vibrant"
 
 
-def _generate_via_huggingface(prompt: str, width: int, height: int):
+def _call_huggingface(prompt: str, width: int, height: int, api_url: str):
+    """Call a single HuggingFace model. Returns Image or None."""
     if not HF_API_TOKEN:
-        print("  ⚠️  HF_API_TOKEN not set — skipping Hugging Face fallback.")
         return None
+    # Enforce divisible-by-8
+    width  = (min(width,  1024) // 8) * 8
+    height = (min(height, 1024) // 8) * 8
     try:
-        print("  🤗 Trying Hugging Face fallback...")
         resp = requests.post(
-            HF_API_URL,
+            api_url,
             headers={"Authorization": f"Bearer {HF_API_TOKEN}"},
-            json={"inputs": prompt, "parameters": {"width": width, "height": height, "num_inference_steps": 30}},
+            json={
+                "inputs": prompt,
+                "parameters": {
+                    "width":               width,
+                    "height":              height,
+                    "num_inference_steps": 30,
+                    "guidance_scale":      7.5,
+                }
+            },
             timeout=120,
         )
         if resp.status_code == 200:
             img = Image.open(BytesIO(resp.content)).convert("RGB")
-            print(f"  ✅ Hugging Face image received ({img.size[0]}x{img.size[1]}px)")
+            img = img.resize((IMAGE_WIDTH, IMAGE_HEIGHT), Image.LANCZOS)
             return img
         elif resp.status_code == 503:
-            print("  ⏳ HF model loading, waiting 20s...")
-            time.sleep(20)
-            resp = requests.post(HF_API_URL, headers={"Authorization": f"Bearer {HF_API_TOKEN}"},
-                                 json={"inputs": prompt}, timeout=120)
+            print(f"  ⏳ HF model loading, waiting 25s...")
+            time.sleep(25)
+            resp = requests.post(
+                api_url,
+                headers={"Authorization": f"Bearer {HF_API_TOKEN}"},
+                json={"inputs": prompt},
+                timeout=120,
+            )
             if resp.status_code == 200:
-                return Image.open(BytesIO(resp.content)).convert("RGB")
-        print(f"  ⚠️  Hugging Face HTTP {resp.status_code}: {resp.text[:200]}")
+                img = Image.open(BytesIO(resp.content)).convert("RGB")
+                img = img.resize((IMAGE_WIDTH, IMAGE_HEIGHT), Image.LANCZOS)
+                return img
+        print(f"  ⚠️  HF HTTP {resp.status_code}: {resp.text[:150]}")
         return None
     except Exception as e:
-        print(f"  ❌ Hugging Face error: {e}")
+        print(f"  ❌ HF error: {e}")
         return None
 
 
-def generate_background(prompt: str, width: int = IMAGE_WIDTH, height: int = IMAGE_HEIGHT):
-    url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}"
-    params = {"width": width, "height": height, "nologo": "true", "enhance": "true",
-              "seed": str(int(time.time()) % 99999)}
+def _generate_via_huggingface(prompt: str, width: int, height: int):
+    """Try SDXL first, fall back to SD 2.1."""
+    if not HF_API_TOKEN:
+        print("  ⚠️  HF_API_TOKEN not set — skipping HuggingFace.")
+        return None
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    print("  🤗 Trying HuggingFace SDXL (primary)...")
+    img = _call_huggingface(prompt, width, height, HF_API_URL_PRIMARY)
+    if img:
+        print(f"  ✅ SDXL image received ({img.size[0]}x{img.size[1]}px)")
+        return img
+
+    print("  🤗 Trying HuggingFace SD 2.1 (secondary)...")
+    img = _call_huggingface(prompt, width, height, HF_API_URL_FALLBACK)
+    if img:
+        print(f"  ✅ SD 2.1 image received ({img.size[0]}x{img.size[1]}px)")
+        return img
+
+    print("  ❌ Both HuggingFace models failed.")
+    return None
+
+
+def _generate_via_pollinations(prompt: str, width: int, height: int):
+    """Last resort — try Pollinations."""
+    url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}"
+    params = {
+        "width":   width,
+        "height":  height,
+        "nologo":  "true",
+        "enhance": "true",
+        "seed":    str(int(time.time()) % 99999),
+        "model":   "flux",
+    }
+    for attempt in range(1, 3):
         try:
-            print(f"  🎨 Pollinations attempt {attempt}/{MAX_RETRIES}...")
-            resp = requests.get(url, params=params, timeout=TIMEOUT_SECS)
+            print(f"  🎨 Pollinations attempt {attempt}/2...")
+            resp = requests.get(url, params=params, timeout=90)
             if resp.status_code == 200:
                 img = Image.open(BytesIO(resp.content)).convert("RGB")
                 print(f"  ✅ Pollinations image received ({img.size[0]}x{img.size[1]}px)")
                 return img
-            elif resp.status_code == 500 and attempt == 2:
-                print("  ⚠️  HTTP 500 — switching to safe fallback prompt...")
-                url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(SAFE_FALLBACK_PROMPT)}"
-            else:
-                print(f"  ⚠️  HTTP {resp.status_code}, retrying in 5s...")
+            print(f"  ⚠️  Pollinations HTTP {resp.status_code}, retrying...")
         except requests.exceptions.ReadTimeout:
-            print(f"  ⏱️  Timeout on attempt {attempt}, waiting 5s...")
+            print(f"  ⏱️  Pollinations timeout on attempt {attempt}...")
         except Exception as e:
             print(f"  ❌ Pollinations error: {e}")
         time.sleep(5)
+    return None
 
-    # Hugging Face fallback
-    print("  ⚠️  Pollinations failed — trying Hugging Face...")
-    hf_img = _generate_via_huggingface(SAFE_FALLBACK_PROMPT, width, height)
-    if hf_img:
-        return hf_img
 
-    print("  ❌ All image generation attempts failed.")
+def generate_background(prompt: str, width: int = IMAGE_WIDTH, height: int = IMAGE_HEIGHT):
+    """
+    Generate background image.
+    Priority: HuggingFace SDXL → HuggingFace SD 2.1 → Pollinations → None
+    """
+    # 1. Try HuggingFace (primary + secondary)
+    img = _generate_via_huggingface(prompt, width, height)
+    if img:
+        return img
+
+    # 2. Retry HuggingFace with safe prompt
+    if prompt != SAFE_FALLBACK_PROMPT:
+        print("  ⚠️  Retrying HuggingFace with safe generic prompt...")
+        img = _generate_via_huggingface(SAFE_FALLBACK_PROMPT, width, height)
+        if img:
+            return img
+
+    # 3. Last resort: Pollinations
+    print("  ⚠️  HuggingFace failed — trying Pollinations as last resort...")
+    img = _generate_via_pollinations(SAFE_FALLBACK_PROMPT, width, height)
+    if img:
+        return img
+
+    print("  ❌ All image generation methods failed.")
     return None
 
 
 def _draw_gradient_overlay(image: Image.Image) -> Image.Image:
-    """Dark gradient overlay at bottom + subtle warm gold tint at top."""
+    """Dark gradient at bottom + subtle warm gold tint at top."""
     img_rgba = image.convert("RGBA")
     overlay  = Image.new("RGBA", img_rgba.size, (0, 0, 0, 0))
     draw     = ImageDraw.Draw(overlay)
@@ -150,7 +246,7 @@ def _draw_gradient_overlay(image: Image.Image) -> Image.Image:
         y     = h - grad_h + i
         draw.rectangle([(0, y), (w, y + 1)], fill=(0, 0, 0, alpha))
 
-    # Subtle gold tint top strip for warmth
+    # Subtle gold tint top strip
     for i in range(80):
         alpha = int(40 * (1 - i / 80))
         draw.rectangle([(0, i), (w, i + 1)], fill=(180, 140, 30, alpha))
@@ -158,7 +254,7 @@ def _draw_gradient_overlay(image: Image.Image) -> Image.Image:
     return Image.alpha_composite(img_rgba, overlay)
 
 
-def _wrap_text(draw, text: str, font, max_width: int) -> list[str]:
+def _wrap_text(draw, text: str, font, max_width: int) -> list:
     words, lines, current = text.split(), [], ""
     for word in words:
         test = f"{current} {word}".strip()
@@ -183,7 +279,7 @@ def add_text_overlay(image: Image.Image, headline: str,
     font_headline = _load_font(FONT_PATHS_BOLD,    56)
     font_source   = _load_font(FONT_PATHS_REGULAR, 28)
 
-    # ── Gold tag badge (top left) ─────────────────────────────────
+    # ── Gold tag badge (top left) ──────────────────────────────────
     tag_text = f"  {tag}  "
     tag_bbox = draw.textbbox((0, 0), tag_text, font=font_tag)
     tag_w    = tag_bbox[2] - tag_bbox[0] + 20
@@ -192,8 +288,24 @@ def add_text_overlay(image: Image.Image, headline: str,
                             radius=6, fill=(180, 140, 20, 230))
     draw.text((pad + 10, pad + 7), tag_text, font=font_tag, fill=(255, 255, 255))
 
-    # ── Headline (bottom area) ────────────────────────────────────
-    lines       = _wrap_text(draw, headline, font_headline, w - pad * 2)
+    # ── Headline (pixel-aware word wrap) ──────────────────────────
+    max_text_w = w - pad * 2
+
+    def wrap_by_pixels(text, font, max_px):
+        words, lines, current = text.split(), [], ""
+        for word in words:
+            test = f"{current} {word}".strip()
+            bbox = draw.textbbox((0, 0), test, font=font)
+            if bbox[2] > max_px and current:
+                lines.append(current)
+                current = word
+            else:
+                current = test
+        if current:
+            lines.append(current)
+        return lines
+
+    lines       = wrap_by_pixels(headline, font_headline, max_text_w)
     line_height = 68
     total_h     = len(lines) * line_height + (45 if source else 0)
     y           = h - pad - total_h
@@ -231,13 +343,13 @@ def create_post_image(headline: str, output_path: str, category: str = "finance"
 if __name__ == "__main__":
     test_cases = [
         {
-            "headline": "Most OFWs Return Home With No Savings After 10 Years Abroad",
-            "category": "ofw",
-            "source":   "PhilStar Business",
-            "output":   "test_ofw.jpg",
+            "headline": "Why High-Earning Professionals Still Struggle to Build Wealth",
+            "category": "finance",
+            "source":   "Forbes",
+            "output":   "test_finance.jpg",
         },
         {
-            "headline": "5 Side Hustles That Let You Earn an Extra $1,000 a Month",
+            "headline": "5 Income Streams Every Professional Should Build in Their 30s",
             "category": "sideincome",
             "source":   "Entrepreneur",
             "output":   "test_sideincome.jpg",

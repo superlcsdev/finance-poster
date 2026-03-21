@@ -15,29 +15,34 @@ load_dotenv()
 GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
-HOOK_PROMPT = """You are a Facebook finance content writer for an audience of Filipino professionals 
-— nurses, IT professionals, engineers, architects, pharmacists, statisticians, and other 
-degree-holding career-driven individuals based in Singapore and the Philippines.
+HOOK_PROMPT = """You are writing a Facebook post caption for Filipino professionals — nurses, 
+IT workers, engineers, architects, pharmacists — based in Singapore and the Philippines.
 
-Write a compelling Facebook post caption for this finance/business article.
+Write a caption for this finance article that sounds like a real person wrote it, not AI.
 
-Tone guidelines:
-- Speak to their professional identity and financial ambition — not hardship
-- Frame around opportunity cost: they earn well but may not be building wealth optimally
-- Peer-to-peer voice — like a financially savvy colleague sharing insight
-- Use data, percentages, or surprising stats when relevant — this audience is analytical
-- Connect to their professional context: high skills, demanding careers, good income
-- Very occasional Filipino word for warmth (max 1 per post, only if completely natural)
-  e.g. "Tayo na." or "Kaya natin ito." — never heavy Taglish
-- Never mention remittance, OFW hardship, or domestic worker framing
-- Subtle nudge toward multiple income streams — not pushy, just thought-provoking
+LANGUAGE RULES — very important:
+- Use simple, everyday English. Short sentences. Max 15 words per sentence.
+- Write like you're messaging a smart friend — casual but not sloppy
+- Contractions always: "you're" not "you are", "it's" not "it is", "don't" not "do not"
+- Be specific: "engineers with good salaries" not "high-income individuals"
+- NEVER use these words: leverage, optimise, empower, unlock, holistic, sustainable,
+  transformative, actionable, synergy, catalyse, utilise, impactful, robust, wealth-building
+- Never start with "Are you..." or "Did you know..." — too generic, sounds like AI
+- One idea per sentence. Break any sentence over 15 words into two.
+- Very occasional Filipino word (max 1 per post, only if natural): "Tayo na." / "Kaya natin."
+
+CONTENT RULES:
+- Speak to the gap between earning well and actually building wealth
+- Nudge them toward thinking about multiple income streams — subtle, not pushy
+- No hardship framing. No OFW struggle. No remittance mentions.
+- A surprising stat or an uncomfortable truth lands better than motivation
 
 Structure:
-- Line 1: Hook — sharp observation, surprising stat, or professional angle. NO emoji on first line.
-- Lines 2–3: Brief insight relevant to a high-earning professional
-- Last line: Thought-provoking CTA that respects their intelligence
+- Line 1: One sharp opening line. No emoji. Not a question. Something that makes them think.
+- Lines 2–3: Two short sentences with real context. No fluff.
+- Last line: Short honest CTA. Something a real colleague would say.
 
-Use 2–3 emojis naturally. Max 4 sentences. Do NOT mention source website.
+Use 2–3 emojis. Max 4 sentences. Don't mention the source website.
 
 Article title  : {title}
 Article summary: {summary}
@@ -84,27 +89,23 @@ def _call_openrouter(prompt: str) -> str | None:
 
 
 def _template_hook(article: dict) -> str:
-    """Professional-tone fallback templates for Filipino professionals."""
+    """Simple, human-sounding fallback templates for Filipino professionals."""
     title = article["title"]
     templates = [
-        f"Most professionals with good salaries still retire with very little to show for it. 📊\n\n"
-        f"{title}\n\n"
-        f"A high income is a starting point — not a destination. The gap between earning well and building wealth "
-        f"is almost always a strategy problem, not an income problem. 💡\n\n"
-        f"What's one financial habit you've built this year? Drop it below 👇",
+        f"A good salary and a growing bank account are two different things. 📊\n"
+        f"{title}.\n"
+        f"Most professionals close the income gap but never close the wealth gap. It's a strategy problem, not an income problem. 💡\n"
+        f"What's one financial habit you're building right now? Drop it below 👇",
 
-        f"Your degree got you the salary. What's building your wealth? 🎯\n\n"
-        f"{title}\n\n"
-        f"The most overlooked financial risk for professionals isn't market volatility — "
-        f"it's over-dependence on a single income source in a world that's increasingly unpredictable. "
-        f"Tayo na. The best time to diversify was five years ago. The second best time is now. 🌱\n\n"
-        f"Are you building a second income stream? Share where you are in the journey 👇",
+        f"Your degree got you the job. What's building your future? 🎯\n"
+        f"{title}.\n"
+        f"One income is fine — until it isn't. The professionals who feel secure are usually the ones who built a second stream before they needed it. 🌱\n"
+        f"Tayo na. Where are you in this journey? Comment below 👇",
 
-        f"High earners and low earners often retire at the same financial level. Here's why. 💸\n\n"
-        f"{title}\n\n"
-        f"It's not about how much you make — it's about the systems you build around what you make. "
-        f"For professionals in demanding careers, the window to build those systems is now, not later. 🔑\n\n"
-        f"Save this and share it with a colleague who needs to hear it 👇",
+        f"Most people with good salaries retire with very little. Here's why. 💸\n"
+        f"{title}.\n"
+        f"It's not about earning more. It's about what you build with what you already earn. 🔑\n"
+        f"Save this — and share it with a colleague who needs a reset.",
     ]
     idx = int(hashlib.md5(title.encode()).hexdigest(), 16) % len(templates)
     return templates[idx]
